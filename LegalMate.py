@@ -225,5 +225,5 @@ st.markdown(
     Made By Sushant Kumar using Streamlit | Supports .docx files with multiple placeholder formats
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True #
 )
