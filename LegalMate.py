@@ -1,5 +1,5 @@
 import streamlit as st
-import document
+import docx
 import re
 from docx import Document
 from io import BytesIO
