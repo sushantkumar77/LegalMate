@@ -102,7 +102,15 @@ if 'api_configured' not in st.session_state:
 if 'waiting_for_clarification' not in st.session_state:
     st.session_state.waiting_for_clarification = False
 
+# Try to get API key from .env file first, then from Streamlit secrets
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
+
+# If not in .env, try Streamlit secrets (for cloud deployment)
+if not GEMINI_API_KEY:
+    try:
+        GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+    except:
+        pass
 
 if GEMINI_API_KEY and not st.session_state.api_configured:
     try:
