@@ -123,14 +123,84 @@ if 'file_name' not in st.session_state:
     st.session_state.file_name = ""
 if 'completed_doc' not in st.session_state:
     st.session_state.completed_doc = ""
+if 'api_configured' not in st.session_state:
+    st.session_state.api_configured = False
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-pro')
+if GEMINI_API_KEY and not st.session_state.api_configured:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel('gemini-pro')
+        st.session_state.api_configured = True
+    except Exception as e:
+        st.error("Failed to configure Gemini API. Please check your API key in .env file.")
 
-def detect_placeholders(text):
+def parse_docx(file):
+    try:
+        doc = Document(file)
+        full_text = []
+        for para in doc.paragraphs:
+            full_text.append(para.text)
+        return '\n'.join(full_text)
+    except Exception as e:
+        st.error(f"Error parsing DOCX: {str(e)}")
+        return ""
+
+def detect_placeholders_with_ai(text):
+    if not st.session_state.api_configured:
+        st.error("❌ Gemini API is not configured. Please add GEMINI_API_KEY to your .env file.")
+        return []
+    
+    try:
+        model = genai.GenerativeModel('gemini-pro')
+        
+        prompt = f"""Analyze this legal document and identify ALL placeholders that need to be filled in.
+        
+Document:
+{text}
+
+Instructions:
+1. Find ALL placeholders in formats like: [Field], {{Field}}, <Field>, ${{Field}}, [[Field]], _____, ...
+2. Also identify any fields that appear to be blank or need filling even if not in standard format
+3. Return ONLY a JSON array of objects with this exact structure:
+{{"placeholders": [{{"label": "exact placeholder text", "original": "original text with brackets", "position": character_position}}]}}
+
+Be thorough and find every single placeholder that needs filling. Include the exact original text as it appears in the document.
+Return valid JSON only, no explanations."""
+
+        response = model.generate_content(prompt)
+        ai_text = response.text.strip()
+        
+        # Clean up response to extract JSON
+        if '```json' in ai_text:
+            ai_text = ai_text.split('```json')[1].split('```')[0].strip()
+        elif '```' in ai_text:
+            ai_text = ai_text.split('```')[1].split('```')[0].strip()
+        
+        import json
+        result = json.loads(ai_text)
+        
+        placeholders = []
+        for idx, item in enumerate(result.get('placeholders', [])):
+            key = re.sub(r'[^a-z0-9]', '_', item['label'].lower())
+            placeholders.append({
+                'key': key,
+                'label': item['label'],
+                'original': item.get('original', item['label']),
+                'value': '',
+                'position': item.get('position', idx),
+                'type': 'ai_detected'
+            })
+        
+        return sorted(placeholders, key=lambda x: x['position'])
+        
+    except Exception as e:
+        st.error(f"AI placeholder detection failed: {str(e)}")
+        # Fallback to regex detection
+        return detect_placeholders_regex(text)
+
+def detect_placeholders_regex(text):
     patterns = [
         (r'\[([^\]]+)\]', 'square'),
         (r'\{([^}]+)\}', 'curly'),
@@ -172,47 +242,64 @@ def detect_placeholders(text):
     
     return sorted(locations, key=lambda x: x['position'])
 
-def parse_docx(file):
+def get_ai_question_for_placeholder(placeholder, filled_data):
+    if not st.session_state.api_configured:
+        return f"What is the {placeholder['label']}?"
+    
     try:
-        doc = Document(file)
-        full_text = []
-        for para in doc.paragraphs:
-            full_text.append(para.text)
-        return '\n'.join(full_text)
-    except Exception as e:
-        st.error(f"Error parsing DOCX: {str(e)}")
-        return ""
+        model = genai.GenerativeModel('gemini-pro')
+        
+        prompt = f"""You are helping to fill out a legal document. Generate a clear, professional question to ask the user for this placeholder.
 
-def get_ai_response(user_message, current_placeholder, filled_data):
-    if not GEMINI_API_KEY:
+Placeholder: {placeholder['label']}
+Context of already filled fields:
+{chr(10).join([f"- {k}: {v}" for k, v in filled_data.items()]) if filled_data else "None yet"}
+
+Generate a clear, concise question (under 20 words) that asks for this specific information. Be professional and specific.
+Return ONLY the question text, nothing else."""
+
+        response = model.generate_content(prompt)
+        question = response.text.strip()
+        
+        # Remove quotes if AI added them
+        question = question.strip('"\'')
+        
+        return question
+        
+    except Exception as e:
+        return f"What is the {placeholder['label']}?"
+
+def validate_response_with_ai(user_message, current_placeholder, filled_data):
+    if not st.session_state.api_configured:
         return {
-            'response': f"Got it! I've recorded '{user_message}' for {current_placeholder['label']}.",
+            'response': f"Recorded: {user_message}",
             'should_proceed': True,
             'validated_value': user_message
         }
     
     try:
-        prompt = f"""You are an AI assistant helping to fill out a legal document.
+        model = genai.GenerativeModel('gemini-pro')
+        
+        prompt = f"""You are validating user input for a legal document placeholder.
 
-Current placeholder to fill: "{current_placeholder['label']}"
+Placeholder: "{current_placeholder['label']}"
 User's response: "{user_message}"
 
-Your tasks:
-1. Validate if the user's response is appropriate for "{current_placeholder['label']}"
-2. If valid, acknowledge briefly (1 sentence) and confirm you're ready for the next field
-3. If invalid or incomplete, ask for clarification politely
-4. Be professional, concise, and helpful
-
-Already filled placeholders:
+Already filled:
 {chr(10).join([f"- {k}: {v}" for k, v in filled_data.items()])}
 
-Respond in a conversational, professional tone. Keep response under 50 words."""
+Tasks:
+1. Check if the response is appropriate and valid for "{current_placeholder['label']}"
+2. If valid: Respond with a brief acknowledgment (1 sentence, under 15 words)
+3. If invalid/incomplete: Ask for clarification professionally (under 20 words)
+
+Be concise and professional. Return only your response text."""
 
         response = model.generate_content(prompt)
-        ai_text = response.text
+        ai_text = response.text.strip()
         
         should_proceed = not any(word in ai_text.lower() for word in 
-                                ['clarify', 'invalid', 'please provide', 'could you', 'can you provide'])
+                                ['clarify', 'invalid', 'please provide', 'could you', 'can you provide', 'more specific'])
         
         return {
             'response': ai_text,
@@ -220,14 +307,49 @@ Respond in a conversational, professional tone. Keep response under 50 words."""
             'validated_value': user_message if should_proceed else None
         }
     except Exception as e:
-        st.error(f"AI Error: {str(e)}")
         return {
             'response': f"Recorded: {user_message}",
             'should_proceed': True,
             'validated_value': user_message
         }
 
-def generate_completed_document():
+def generate_completed_document_with_ai():
+    if not st.session_state.api_configured:
+        return generate_completed_document_simple()
+    
+    try:
+        model = genai.GenerativeModel('gemini-pro')
+        
+        replacements = "\n".join([f"Replace '{p['original']}' with '{st.session_state.filled_data.get(p['key'], p['original'])}'" 
+                                  for p in st.session_state.placeholders])
+        
+        prompt = f"""Replace all placeholders in this legal document with the provided values. Maintain exact formatting and structure.
+
+Original Document:
+{st.session_state.document_text}
+
+Replacements:
+{replacements}
+
+Return ONLY the completed document with placeholders replaced. Do not add explanations or modifications."""
+
+        response = model.generate_content(prompt)
+        completed = response.text.strip()
+        
+        # Clean up if AI added markdown code blocks
+        if '```' in completed:
+            completed = completed.split('```')[1]
+            if completed.startswith('text') or completed.startswith('plaintext'):
+                completed = '\n'.join(completed.split('\n')[1:])
+            completed = completed.strip()
+        
+        return completed
+        
+    except Exception as e:
+        st.warning(f"AI generation failed, using fallback method: {str(e)}")
+        return generate_completed_document_simple()
+
+def generate_completed_document_simple():
     completed = st.session_state.document_text
     for placeholder in st.session_state.placeholders:
         value = st.session_state.filled_data.get(placeholder['key'], placeholder['original'])
@@ -244,6 +366,12 @@ def reset_app():
     st.session_state.file_name = ""
     st.session_state.completed_doc = ""
     st.rerun()
+
+# Check API configuration
+if not GEMINI_API_KEY:
+    st.error("⚠️ Gemini API Key not found! Please add GEMINI_API_KEY to your .env file.")
+    st.info("Get your API key from: https://makersuite.google.com/app/apikey")
+    st.stop()
 
 col1, col2 = st.columns([6, 1])
 with col1:
@@ -262,7 +390,7 @@ if st.session_state.step == 'upload':
         st.markdown("""
         <div class="upload-section">
             <h2>📤 Upload Your Document</h2>
-            <p>Upload a legal document with placeholders and I'll help you fill them in</p>
+            <p>Upload a legal document with placeholders and AI will help you fill them in</p>
         </div>
         """, unsafe_allow_html=True)
         
@@ -275,7 +403,7 @@ if st.session_state.step == 'upload':
         )
         
         if uploaded_file:
-            with st.spinner("Processing document..."):
+            with st.spinner("🤖 AI is analyzing your document..."):
                 if uploaded_file.name.endswith('.docx'):
                     text = parse_docx(uploaded_file)
                 else:
@@ -285,32 +413,32 @@ if st.session_state.step == 'upload':
                     st.session_state.document_text = text
                     st.session_state.file_name = uploaded_file.name
                     
-                    placeholders = detect_placeholders(text)
+                    placeholders = detect_placeholders_with_ai(text)
                     
                     if placeholders:
                         st.session_state.placeholders = placeholders
+                        
+                        first_question = get_ai_question_for_placeholder(placeholders[0], {})
+                        
                         st.session_state.messages = [{
                             'type': 'assistant',
-                            'content': f"I've analyzed your document and found {len(placeholders)} placeholders to fill. Let's start! What is the {placeholders[0]['label']}?",
+                            'content': f"I've analyzed your document and found {len(placeholders)} placeholders to fill. Let's start! {first_question}",
                             'timestamp': datetime.now()
                         }]
                         st.session_state.step = 'chat'
                         st.rerun()
                     else:
-                        st.error("❌ No placeholders detected in your document. Please upload a document with placeholders like [Company Name], {Date}, etc.")
+                        st.error("❌ No placeholders detected in your document. Please upload a document with placeholders.")
         
         st.markdown("<br>", unsafe_allow_html=True)
         
-        with st.expander("ℹ️ Supported Placeholder Formats"):
+        with st.expander("ℹ️ AI-Powered Detection"):
             st.markdown("""
-            - [Company Name] - Square brackets
-            - {Date} - Curly braces  
-            - <Amount> - Angle brackets
-            - ${Variable} - Dollar sign with braces
-            - [[Field]] - Double square brackets
-            - {{Field}} - Double curly braces
-            - _____ - Underscores (3 or more)
-            - ... - Dots (3 or more)
+            The AI automatically detects:
+            - Standard formats: [Field], {Field}, <Field>, etc.
+            - Custom placeholders and blank spaces
+            - Context-aware field identification
+            - Smart validation of your inputs
             """)
 
 elif st.session_state.step == 'chat':
@@ -337,7 +465,7 @@ elif st.session_state.step == 'chat':
                 else:
                     st.markdown(f"""
                     <div class="chat-message assistant-message">
-                        <strong>Assistant:</strong> {msg['content']}
+                        <strong>AI Assistant:</strong> {msg['content']}
                     </div>
                     """, unsafe_allow_html=True)
         
@@ -360,7 +488,9 @@ elif st.session_state.step == 'chat':
                     })
                     
                     current_placeholder = st.session_state.placeholders[st.session_state.current_index]
-                    ai_result = get_ai_response(user_input, current_placeholder, st.session_state.filled_data)
+                    
+                    with st.spinner("🤖 AI is validating..."):
+                        ai_result = validate_response_with_ai(user_input, current_placeholder, st.session_state.filled_data)
                     
                     if ai_result['should_proceed']:
                         st.session_state.filled_data[current_placeholder['key']] = user_input
@@ -368,7 +498,8 @@ elif st.session_state.step == 'chat':
                         
                         if st.session_state.current_index < len(st.session_state.placeholders):
                             next_placeholder = st.session_state.placeholders[st.session_state.current_index]
-                            response = f"{ai_result['response']} Next: What is the {next_placeholder['label']}?"
+                            next_question = get_ai_question_for_placeholder(next_placeholder, st.session_state.filled_data)
+                            response = f"{ai_result['response']} {next_question}"
                         else:
                             response = "Perfect! All placeholders have been filled. Your document is ready for review! 🎉"
                             st.session_state.step = 'complete'
@@ -414,14 +545,15 @@ elif st.session_state.step == 'complete':
         st.markdown("""
         <div class="success-box">
             <h1>✅ Document Complete!</h1>
-            <p>All placeholders have been filled. Review and download your document.</p>
+            <p>AI has generated your completed document. Review and download below.</p>
         </div>
         """, unsafe_allow_html=True)
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    completed_doc = generate_completed_document()
-    st.session_state.completed_doc = completed_doc
+    with st.spinner("🤖 AI is generating your final document..."):
+        completed_doc = generate_completed_document_with_ai()
+        st.session_state.completed_doc = completed_doc
     
     st.markdown("### 📄 Document Preview")
     st.markdown(f'<div class="doc-preview">{completed_doc}</div>', unsafe_allow_html=True)
@@ -461,19 +593,11 @@ elif st.session_state.step == 'complete':
             reset_app()
 
 with st.sidebar:
-    st.markdown("### ⚙️ Settings")
-    
-    api_key_input = st.text_input(
-        "Gemini API Key",
-        value=GEMINI_API_KEY,
-        type="password",
-        help="Enter your Google Gemini API key for AI-powered responses"
-    )
-    
-    if api_key_input and api_key_input != GEMINI_API_KEY:
-        os.environ['GEMINI_API_KEY'] = api_key_input
-        genai.configure(api_key=api_key_input)
-        st.success("✅ API Key updated!")
+    st.markdown("### 🤖 AI Status")
+    if st.session_state.api_configured:
+        st.success("✅ Gemini AI Connected")
+    else:
+        st.error("❌ AI Not Configured")
     
     st.markdown("---")
     
@@ -487,12 +611,15 @@ with st.sidebar:
     
     st.markdown("### ℹ️ About")
     st.info("""
-    This app helps you fill legal documents by:
-    - Detecting placeholders automatically
-    - Guiding you through each field
-    - Using AI to validate inputs
-    - Generating completed documents
+    This app uses Gemini AI to:
+    - Intelligently detect placeholders
+    - Generate contextual questions
+    - Validate your responses
+    - Generate the final document
+    
+    All securely powered by your .env API key.
     """)
     
     st.markdown("---")
     st.caption("Built with Streamlit & Google Gemini AI")
+    st.caption("🔒 API Key secured in .env file")
