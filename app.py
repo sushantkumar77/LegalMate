@@ -97,10 +97,10 @@ if 'file_name' not in st.session_state:
     st.session_state.file_name = ""
 if 'completed_doc' not in st.session_state:
     st.session_state.completed_doc = ""
-if 'api_configured' not in st.session_state:
-    st.session_state.api_configured = False
 if 'waiting_for_clarification' not in st.session_state:
     st.session_state.waiting_for_clarification = False
+if 'api_configured' not in st.session_state:
+    st.session_state.api_configured = False
 
 # Try to get API key from .env file first, then from Streamlit secrets
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
@@ -115,6 +115,20 @@ if not GEMINI_API_KEY:
 if GEMINI_API_KEY and not st.session_state.api_configured:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
+        # Test which models are available
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+            st.session_state.model_name = 'gemini-1.5-flash-latest'
+        except:
+            try:
+                model = genai.GenerativeModel('gemini-1.5-pro-latest')
+                st.session_state.model_name = 'gemini-1.5-pro-latest'
+            except:
+                try:
+                    model = genai.GenerativeModel('gemini-pro')
+                    st.session_state.model_name = 'gemini-pro'
+                except:
+                    st.session_state.model_name = 'gemini-1.5-flash'
         st.session_state.api_configured = True
     except Exception as e:
         st.error(f"Failed to configure Gemini API: {str(e)}")
@@ -138,7 +152,7 @@ def detect_placeholders_with_ai(text):
         return []
     
     try:
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel(st.session_state.model_name)
         
         prompt = f"""You are analyzing a legal document to find ALL placeholders that need user input.
 
@@ -216,7 +230,7 @@ def get_ai_question(placeholder, filled_data):
         return f"What should I use for {placeholder['label']}?"
     
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel(st.session_state.model_name)
         
         # Get document context around placeholder
         doc_text = st.session_state.document_text
@@ -280,7 +294,7 @@ def validate_with_ai(user_input, placeholder, filled_data):
         }
     
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel(st.session_state.model_name)
         
         prompt = f"""You are validating user input for a legal document.
 
@@ -610,7 +624,7 @@ elif st.session_state.step == 'complete':
 with st.sidebar:
     st.markdown("### 🤖 AI Status")
     if st.session_state.api_configured:
-        st.success("✅ Gemini Connected")
+        st.success(f"✅ Connected: {st.session_state.model_name}")
     else:
         st.error("❌ Not Connected")
     
