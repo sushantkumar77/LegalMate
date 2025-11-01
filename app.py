@@ -80,7 +80,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
+# Initialize ALL session state variables first
 if 'step' not in st.session_state:
     st.session_state.step = 'upload'
 if 'placeholders' not in st.session_state:
@@ -97,41 +97,51 @@ if 'file_name' not in st.session_state:
     st.session_state.file_name = ""
 if 'completed_doc' not in st.session_state:
     st.session_state.completed_doc = ""
-if 'waiting_for_clarification' not in st.session_state:
-    st.session_state.waiting_for_clarification = False
 if 'api_configured' not in st.session_state:
     st.session_state.api_configured = False
+if 'waiting_for_clarification' not in st.session_state:
+    st.session_state.waiting_for_clarification = False
+if 'model_name' not in st.session_state:
+    st.session_state.model_name = None
 
-# Try to get API key from .env file first, then from Streamlit secrets
+# Get API key
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
-
-# If not in .env, try Streamlit secrets (for cloud deployment)
 if not GEMINI_API_KEY:
     try:
         GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
     except:
         pass
 
+# Configure API once
 if GEMINI_API_KEY and not st.session_state.api_configured:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        # Test which models are available
-        try:
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            st.session_state.model_name = 'gemini-1.5-flash-latest'
-        except:
+        
+        # Try different model names
+        model_options = [
+            'gemini-1.5-flash',
+            'gemini-1.5-pro', 
+            'gemini-pro',
+            'models/gemini-1.5-flash',
+            'models/gemini-pro'
+        ]
+        
+        for model_name in model_options:
             try:
-                model = genai.GenerativeModel('gemini-1.5-pro-latest')
-                st.session_state.model_name = 'gemini-1.5-pro-latest'
+                test_model = genai.GenerativeModel(model_name)
+                # Test with a simple prompt
+                test_model.generate_content("Hi")
+                st.session_state.model_name = model_name
+                st.session_state.api_configured = True
+                break
             except:
-                try:
-                    model = genai.GenerativeModel('gemini-pro')
-                    st.session_state.model_name = 'gemini-pro'
-                except:
-                    st.session_state.model_name = 'gemini-1.5-flash'
-        st.session_state.api_configured = True
+                continue
+                
+        if not st.session_state.api_configured:
+            st.error("Could not find a working Gemini model. Please check your API key.")
+            
     except Exception as e:
-        st.error(f"Failed to configure Gemini API: {str(e)}")
+        st.error(f"API configuration failed: {str(e)}")
 
 def parse_docx(file):
     """Parse DOCX file and extract text"""
@@ -146,9 +156,9 @@ def parse_docx(file):
         return ""
 
 def detect_placeholders_with_ai(text):
-    """Use Gemini AI to intelligently detect placeholders in document"""
-    if not st.session_state.api_configured:
-        st.error("❌ Gemini API not configured. Please add GEMINI_API_KEY to .env file.")
+    """Use Gemini AI to intelligently detect placeholders"""
+    if not st.session_state.api_configured or not st.session_state.model_name:
+        st.error("❌ Gemini API not configured properly")
         return []
     
     try:
@@ -159,36 +169,36 @@ def detect_placeholders_with_ai(text):
 DOCUMENT TEXT:
 {text}
 
-TASK: Find every placeholder in the document. Look for:
+TASK: Find every placeholder. Look for:
 1. Text in brackets: [Company Name], {{Investor}}, <Date>
-2. Underscores or blanks that need filling: _________, _____________
-3. Dollar signs with brackets: ${{Amount}}
-4. Words like "INSERT", "FILL IN", "[TBD]"
+2. Underscores that need filling: _________ (only if 5+ chars)
+3. Dollar brackets: ${{Amount}}
+4. Keywords: INSERT, FILL IN, [TBD]
 
-CRITICAL RULES:
-- Ignore short underscores (less than 5 characters)
+RULES:
 - Each placeholder must be unique and meaningful
-- Order them by appearance in document
-- Extract clear, descriptive labels
+- Ignore very short underscores (under 5 chars)
+- Order by appearance in document
+- Extract clear labels
 
-OUTPUT FORMAT (JSON only, no markdown):
+OUTPUT (valid JSON only, no markdown):
 {{
   "placeholders": [
     {{
       "label": "Company Name",
       "original": "[Company Name]",
-      "description": "The legal name of the company",
+      "description": "Legal name of company",
       "position": 145
     }}
   ]
 }}
 
-Return ONLY valid JSON, no explanations or markdown."""
+Return ONLY the JSON."""
 
         response = model.generate_content(prompt)
         ai_text = response.text.strip()
         
-        # Clean JSON response
+        # Clean JSON
         if '```json' in ai_text:
             ai_text = ai_text.split('```json')[1].split('```')[0].strip()
         elif '```' in ai_text:
@@ -202,8 +212,7 @@ Return ONLY valid JSON, no explanations or markdown."""
         for item in result.get('placeholders', []):
             label = item['label'].strip()
             
-            # Skip if we've seen this label or if it's too generic
-            if label in seen_labels or label.lower() in ['the', 'and', 'or', 'insert']:
+            if label in seen_labels or label.lower() in ['the', 'and', 'or', 'insert', 'a', 'an']:
                 continue
             
             seen_labels.add(label)
@@ -225,14 +234,13 @@ Return ONLY valid JSON, no explanations or markdown."""
         return []
 
 def get_ai_question(placeholder, filled_data):
-    """Generate smart, context-aware question for placeholder"""
+    """Generate contextual question for placeholder"""
     if not st.session_state.api_configured:
         return f"What should I use for {placeholder['label']}?"
     
     try:
         model = genai.GenerativeModel(st.session_state.model_name)
         
-        # Get document context around placeholder
         doc_text = st.session_state.document_text
         pos = doc_text.find(placeholder['original'])
         if pos >= 0:
@@ -247,31 +255,26 @@ def get_ai_question(placeholder, filled_data):
             for p in st.session_state.placeholders[:st.session_state.current_index]
         ]) if filled_data else "This is the first field."
         
-        prompt = f"""Generate ONE clear question to ask the user for this information.
+        prompt = f"""Generate ONE clear question to ask for this information.
 
 PLACEHOLDER: {placeholder['label']}
 APPEARS AS: {placeholder['original']}
-DESCRIPTION: {placeholder.get('description', 'N/A')}
 
-DOCUMENT CONTEXT:
-...{context}...
+CONTEXT: ...{context}...
 
-ALREADY FILLED:
-{filled_info}
+FILLED: {filled_info}
 
-REQUIREMENTS:
-1. Ask ONE specific question (under 20 words)
-2. Include helpful examples if applicable (dates, amounts, states)
-3. Be conversational and clear
-4. Do NOT repeat information from previous questions
-5. End with a question mark
+RULES:
+1. ONE question under 20 words
+2. Include examples if helpful (dates, amounts, states)
+3. Be conversational
+4. End with ?
 
 EXAMPLES:
 - "What is the investor's full legal name?"
 - "What amount is being invested? (e.g., $100,000)"
-- "What date is this agreement signed? (format: January 15, 2024)"
 
-Return ONLY the question, nothing else."""
+Return ONLY the question."""
 
         response = model.generate_content(prompt)
         question = response.text.strip().strip('"\'')
@@ -285,47 +288,35 @@ Return ONLY the question, nothing else."""
         return f"What is the {placeholder['label']}?"
 
 def validate_with_ai(user_input, placeholder, filled_data):
-    """Validate user input and determine if we should proceed or ask for clarification"""
+    """Validate user input"""
     if not st.session_state.api_configured:
-        return {
-            'valid': True,
-            'feedback': f"Got it: {user_input}",
-            'value': user_input
-        }
+        return {'valid': True, 'feedback': 'Got it!', 'value': user_input}
     
     try:
         model = genai.GenerativeModel(st.session_state.model_name)
         
-        prompt = f"""You are validating user input for a legal document.
+        prompt = f"""Validate user input for legal document field.
 
 FIELD: {placeholder['label']}
-USER'S ANSWER: "{user_input}"
+USER INPUT: "{user_input}"
 
-ALREADY FILLED:
-{chr(10).join([f"- {k}: {v}" for k, v in filled_data.items()]) if filled_data else "None yet"}
+TASK: Check if reasonable. Respond with JSON only (no markdown):
 
-TASK:
-1. Check if "{user_input}" is reasonable for field "{placeholder['label']}"
-2. Respond with JSON only (no markdown)
-
-OUTPUT FORMAT:
 {{
   "valid": true/false,
-  "feedback": "Brief confirmation or request for clarification",
-  "value": "cleaned/formatted value"
+  "feedback": "Brief message",
+  "value": "cleaned value"
 }}
 
 RULES:
-- If valid: feedback should be 1-2 words like "Perfect!" or "Got it!"
-- If invalid: feedback should ask for clarification (under 15 words)
-- Always be professional and concise
+- If valid: feedback = "Perfect!" or "Got it!" (1-3 words)
+- If invalid: feedback = clarification question (under 15 words)
 
-Return ONLY valid JSON."""
+Return ONLY JSON."""
 
         response = model.generate_content(prompt)
         ai_text = response.text.strip()
         
-        # Clean JSON
         if '```json' in ai_text:
             ai_text = ai_text.split('```json')[1].split('```')[0].strip()
         elif '```' in ai_text:
@@ -339,87 +330,40 @@ Return ONLY valid JSON."""
             'value': result.get('value', user_input)
         }
         
-    except Exception as e:
-        return {
-            'valid': True,
-            'feedback': 'Recorded',
-            'value': user_input
-        }
+    except:
+        return {'valid': True, 'feedback': 'Recorded', 'value': user_input}
 
 def generate_completed_document():
-    """Generate final document with all placeholders filled"""
-    if not st.session_state.api_configured:
-        # Simple replacement
-        completed = st.session_state.document_text
-        for p in st.session_state.placeholders:
-            value = st.session_state.filled_data.get(p['key'], p['original'])
-            completed = completed.replace(p['original'], value)
-        return completed
-    
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        
-        replacements = []
-        for p in st.session_state.placeholders:
-            value = st.session_state.filled_data.get(p['key'], p['original'])
-            replacements.append(f"Replace '{p['original']}' with '{value}'")
-        
-        prompt = f"""Replace placeholders in this document with provided values. Maintain exact formatting.
-
-ORIGINAL DOCUMENT:
-{st.session_state.document_text}
-
-REPLACEMENTS:
-{chr(10).join(replacements)}
-
-Return ONLY the completed document. No explanations, no markdown formatting."""
-
-        response = model.generate_content(prompt)
-        completed = response.text.strip()
-        
-        # Remove markdown if AI added it
-        if '```' in completed:
-            parts = completed.split('```')
-            if len(parts) >= 2:
-                completed = parts[1]
-                if '\n' in completed:
-                    lines = completed.split('\n')
-                    completed = '\n'.join(lines[1:]) if lines[0].strip() in ['text', 'plaintext', ''] else '\n'.join(lines)
-        
-        return completed.strip()
-        
-    except Exception as e:
-        st.warning(f"AI generation failed: {str(e)}")
-        # Fallback to simple replacement
-        completed = st.session_state.document_text
-        for p in st.session_state.placeholders:
-            value = st.session_state.filled_data.get(p['key'], p['original'])
-            completed = completed.replace(p['original'], value)
-        return completed
+    """Generate final document"""
+    completed = st.session_state.document_text
+    for p in st.session_state.placeholders:
+        value = st.session_state.filled_data.get(p['key'], p['original'])
+        completed = completed.replace(p['original'], value)
+    return completed
 
 def reset_app():
-    """Reset all session state"""
+    """Reset all state"""
     for key in list(st.session_state.keys()):
         del st.session_state[key]
     st.rerun()
 
-# Check API configuration
+# Check API
 if not GEMINI_API_KEY:
-    st.error("⚠️ Gemini API Key not found! Add GEMINI_API_KEY to your .env file")
-    st.info("Get your free API key: https://makersuite.google.com/app/apikey")
+    st.error("⚠️ No API key found! Add GEMINI_API_KEY to .env file")
+    st.info("Get free key: https://makersuite.google.com/app/apikey")
     st.stop()
 
 # Header
 col1, col2 = st.columns([6, 1])
 with col1:
     st.title("📄 Legal Document Processor")
-    st.caption("AI-powered document completion with intelligent placeholder detection")
+    st.caption("AI-powered document completion")
 with col2:
     if st.session_state.step != 'upload':
         if st.button("🔄 Reset"):
             reset_app()
 
-# UPLOAD STEP
+# UPLOAD
 if st.session_state.step == 'upload':
     st.markdown("---")
     
@@ -427,20 +371,15 @@ if st.session_state.step == 'upload':
     with col2:
         st.markdown("""
         <div class="upload-section">
-            <h2>📤 Upload Your Document</h2>
-            <p>Upload a legal document and AI will identify all placeholders</p>
+            <h2>📤 Upload Document</h2>
+            <p>AI will identify all placeholders</p>
         </div>
         """, unsafe_allow_html=True)
         
-        uploaded_file = st.file_uploader(
-            "Choose a file",
-            type=['txt', 'docx'],
-            help="Supports .txt and .docx files"
-        )
+        uploaded_file = st.file_uploader("Choose file", type=['txt', 'docx'])
         
         if uploaded_file:
-            with st.spinner("🤖 Analyzing document with AI..."):
-                # Parse file
+            with st.spinner("🤖 Analyzing..."):
                 if uploaded_file.name.endswith('.docx'):
                     text = parse_docx(uploaded_file)
                 else:
@@ -450,38 +389,34 @@ if st.session_state.step == 'upload':
                     st.session_state.document_text = text
                     st.session_state.file_name = uploaded_file.name
                     
-                    # Detect placeholders with AI
                     placeholders = detect_placeholders_with_ai(text)
                     
                     if placeholders:
                         st.session_state.placeholders = placeholders
-                        
-                        # Generate first question
-                        first_question = get_ai_question(placeholders[0], {})
+                        first_q = get_ai_question(placeholders[0], {})
                         
                         st.session_state.messages = [{
                             'type': 'assistant',
-                            'content': f"I found {len(placeholders)} fields to fill. Let's start!\n\n{first_question}"
+                            'content': f"Found {len(placeholders)} fields!\n\n{first_q}"
                         }]
                         st.session_state.step = 'chat'
                         st.rerun()
                     else:
-                        st.error("No placeholders found in your document.")
+                        st.error("No placeholders detected")
 
-# CHAT STEP
+# CHAT
 elif st.session_state.step == 'chat':
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.markdown("### 💬 Fill in the Details")
+        st.markdown("### 💬 Fill Details")
         
-        # Progress
         progress = st.session_state.current_index / len(st.session_state.placeholders)
         st.progress(progress)
-        st.caption(f"{st.session_state.current_index}/{len(st.session_state.placeholders)} completed")
+        st.caption(f"{st.session_state.current_index}/{len(st.session_state.placeholders)} done")
         st.markdown("---")
         
-        # Chat history
+        # Messages
         for msg in st.session_state.messages:
             if msg['type'] == 'user':
                 st.markdown(f'<div class="chat-message user-message"><strong>You:</strong> {msg["content"]}</div>', 
@@ -492,53 +427,45 @@ elif st.session_state.step == 'chat':
         
         st.markdown("---")
         
-        # Input form
+        # Input
         if st.session_state.current_index < len(st.session_state.placeholders):
-            with st.form(key='chat_form', clear_on_submit=True):
-                user_input = st.text_input("Your answer:", placeholder="Type here...")
+            with st.form(key='chat', clear_on_submit=True):
+                user_input = st.text_input("Answer:", placeholder="Type here...")
                 submitted = st.form_submit_button("Send")
                 
                 if submitted and user_input.strip():
-                    # Add user message
                     st.session_state.messages.append({
                         'type': 'user',
                         'content': user_input.strip()
                     })
                     
-                    current_placeholder = st.session_state.placeholders[st.session_state.current_index]
+                    current = st.session_state.placeholders[st.session_state.current_index]
                     
-                    # Validate with AI
                     with st.spinner("Validating..."):
-                        validation = validate_with_ai(user_input.strip(), current_placeholder, st.session_state.filled_data)
+                        val = validate_with_ai(user_input.strip(), current, st.session_state.filled_data)
                     
-                    if validation['valid']:
-                        # Save value and move to next
-                        st.session_state.filled_data[current_placeholder['key']] = validation['value']
+                    if val['valid']:
+                        st.session_state.filled_data[current['key']] = val['value']
                         st.session_state.current_index += 1
-                        st.session_state.waiting_for_clarification = False
                         
-                        # Check if done
                         if st.session_state.current_index >= len(st.session_state.placeholders):
                             st.session_state.messages.append({
                                 'type': 'assistant',
-                                'content': f"{validation['feedback']} All done! 🎉"
+                                'content': f"{val['feedback']} All done! 🎉"
                             })
                             st.session_state.step = 'complete'
                         else:
-                            # Ask next question
-                            next_placeholder = st.session_state.placeholders[st.session_state.current_index]
-                            next_question = get_ai_question(next_placeholder, st.session_state.filled_data)
+                            next_p = st.session_state.placeholders[st.session_state.current_index]
+                            next_q = get_ai_question(next_p, st.session_state.filled_data)
                             
                             st.session_state.messages.append({
                                 'type': 'assistant',
-                                'content': f"{validation['feedback']}\n\n{next_question}"
+                                'content': f"{val['feedback']}\n\n{next_q}"
                             })
                     else:
-                        # Need clarification
-                        st.session_state.waiting_for_clarification = True
                         st.session_state.messages.append({
                             'type': 'assistant',
-                            'content': validation['feedback']
+                            'content': val['feedback']
                         })
                     
                     st.rerun()
@@ -564,7 +491,7 @@ elif st.session_state.step == 'chat':
             st.markdown(f'<div class="placeholder-box {status}">{icon} <strong>{p["label"]}</strong>{display}</div>', 
                        unsafe_allow_html=True)
 
-# COMPLETE STEP
+# COMPLETE
 elif st.session_state.step == 'complete':
     st.markdown("---")
     
@@ -572,25 +499,22 @@ elif st.session_state.step == 'complete':
     with col2:
         st.markdown("""
         <div class="success-box">
-            <h1>✅ Document Complete!</h1>
-            <p>Your document is ready for review and download</p>
+            <h1>✅ Complete!</h1>
+            <p>Your document is ready</p>
         </div>
         """, unsafe_allow_html=True)
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Generate final document
-    with st.spinner("Generating final document..."):
+    with st.spinner("Generating..."):
         if not st.session_state.completed_doc:
             st.session_state.completed_doc = generate_completed_document()
     
-    # Preview
     st.markdown("### 📄 Preview")
     st.markdown(f'<div class="doc-preview">{st.session_state.completed_doc}</div>', unsafe_allow_html=True)
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # Download buttons
     col1, col2, col3 = st.columns([1, 1, 1])
     
     with col1:
@@ -602,7 +526,6 @@ elif st.session_state.step == 'complete':
         )
     
     with col2:
-        # Generate DOCX
         doc = Document()
         for line in st.session_state.completed_doc.split('\n'):
             doc.add_paragraph(line)
@@ -617,14 +540,14 @@ elif st.session_state.step == 'complete':
         )
     
     with col3:
-        if st.button("🔄 New Document"):
+        if st.button("🔄 New"):
             reset_app()
 
 # Sidebar
 with st.sidebar:
     st.markdown("### 🤖 AI Status")
-    if st.session_state.api_configured:
-        st.success(f"✅ Connected: {st.session_state.model_name}")
+    if st.session_state.api_configured and st.session_state.model_name:
+        st.success(f"✅ {st.session_state.model_name}")
     else:
         st.error("❌ Not Connected")
     
@@ -632,11 +555,9 @@ with st.sidebar:
     
     if st.session_state.placeholders:
         st.markdown("### 📊 Progress")
-        st.metric("Total Fields", len(st.session_state.placeholders))
-        st.metric("Completed", len(st.session_state.filled_data))
-        st.metric("Remaining", len(st.session_state.placeholders) - len(st.session_state.filled_data))
+        st.metric("Total", len(st.session_state.placeholders))
+        st.metric("Done", len(st.session_state.filled_data))
+        st.metric("Left", len(st.session_state.placeholders) - len(st.session_state.filled_data))
     
     st.markdown("---")
-    st.markdown("### ℹ️ About")
-    st.info("AI-powered document processor using Google Gemini")
-    st.caption("Secure • Fast • Intelligent")
+    st.info("AI-powered with Google Gemini")
