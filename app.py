@@ -242,31 +242,58 @@ def detect_placeholders_regex(text):
     
     return sorted(locations, key=lambda x: x['position'])
 
-def get_ai_question_for_placeholder(placeholder, filled_data):
+def get_ai_question_for_placeholder(placeholder, filled_data, document_context=""):
     if not st.session_state.api_configured:
         return f"What is the {placeholder['label']}?"
     
     try:
         model = genai.GenerativeModel('gemini-pro')
         
-        prompt = f"""You are helping to fill out a legal document. Generate a clear, professional question to ask the user for this placeholder.
+        # Get surrounding context from document
+        doc_text = st.session_state.document_text
+        placeholder_pos = doc_text.find(placeholder['original'])
+        context_start = max(0, placeholder_pos - 200)
+        context_end = min(len(doc_text), placeholder_pos + 200)
+        surrounding_text = doc_text[context_start:context_end]
+        
+        prompt = f"""You are an AI assistant helping someone fill out a legal document (appears to be a SAFE agreement). 
 
-Placeholder: {placeholder['label']}
-Context of already filled fields:
-{chr(10).join([f"- {k}: {v}" for k, v in filled_data.items()]) if filled_data else "None yet"}
+Current placeholder to ask about: "{placeholder['label']}" (appears as "{placeholder['original']}" in document)
 
-Generate a clear, concise question (under 20 words) that asks for this specific information. Be professional and specific.
-Return ONLY the question text, nothing else."""
+Document context around this placeholder:
+"...{surrounding_text}..."
+
+Already filled information:
+{chr(10).join([f"- {p['label']}: {filled_data.get(p['key'], 'Not filled')}" for p in st.session_state.placeholders[:st.session_state.current_index]]) if filled_data else "This is the first field"}
+
+Your task: Generate a natural, conversational question that:
+1. Clearly explains what information is needed
+2. Provides helpful context if the placeholder name is unclear
+3. Suggests format or examples if appropriate (e.g., dates, amounts, jurisdictions)
+4. Is professional but friendly
+
+Examples of good questions:
+- "What is the company's full legal name?" (for Company Name)
+- "What amount is the investor contributing? (e.g., $100,000)" (for Purchase Amount)
+- "What date is this SAFE agreement being signed? (e.g., January 15, 2024)" (for Date)
+- "In which state is the company incorporated? (e.g., Delaware, California)" (for State of Incorporation)
+
+Return ONLY the question, nothing else. Keep it under 25 words."""
 
         response = model.generate_content(prompt)
         question = response.text.strip()
         
         # Remove quotes if AI added them
-        question = question.strip('"\'')
+        question = question.strip('"\'').strip()
+        
+        # Ensure it ends with a question mark
+        if not question.endswith('?'):
+            question += '?'
         
         return question
         
     except Exception as e:
+        st.error(f"Error generating question: {str(e)}")
         return f"What is the {placeholder['label']}?"
 
 def validate_response_with_ai(user_message, current_placeholder, filled_data):
@@ -280,26 +307,44 @@ def validate_response_with_ai(user_message, current_placeholder, filled_data):
     try:
         model = genai.GenerativeModel('gemini-pro')
         
-        prompt = f"""You are validating user input for a legal document placeholder.
+        # Determine what type of field this is
+        field_type = current_placeholder['label'].lower()
+        
+        prompt = f"""You are an AI assistant validating user input for a legal document (SAFE agreement).
 
-Placeholder: "{current_placeholder['label']}"
+Field being filled: "{current_placeholder['label']}"
 User's response: "{user_message}"
 
-Already filled:
-{chr(10).join([f"- {k}: {v}" for k, v in filled_data.items()])}
+Previous fields filled:
+{chr(10).join([f"- {p['label']}: {filled_data.get(p['key'], 'N/A')}" for p in st.session_state.placeholders[:st.session_state.current_index]]) if filled_data else "This is the first field"}
 
-Tasks:
-1. Check if the response is appropriate and valid for "{current_placeholder['label']}"
-2. If valid: Respond with a brief acknowledgment (1 sentence, under 15 words)
-3. If invalid/incomplete: Ask for clarification professionally (under 20 words)
+Your tasks:
+1. Determine if "{user_message}" is a valid, appropriate response for "{current_placeholder['label']}"
+2. Check for common issues:
+   - For amounts: Should include currency and numbers (e.g., $50,000)
+   - For dates: Should be a clear date format
+   - For names: Should be properly capitalized and complete
+   - For states/jurisdictions: Should be valid state/country names
+   - For unclear placeholders (like underscores): Ask what information is needed
+3. If valid: Give a brief, encouraging acknowledgment (10-15 words max)
+4. If invalid/unclear: Politely explain the issue and ask for correction (20-25 words max)
 
-Be concise and professional. Return only your response text."""
+Response format:
+- If VALID: "Great! [brief acknowledgment]" or "Perfect, [brief comment]"
+- If INVALID: "I need [explain what's wrong]. Could you provide [what you need]?"
+
+Be conversational and helpful. Return ONLY your response."""
 
         response = model.generate_content(prompt)
-        ai_text = response.text.strip()
+        ai_text = response.text.strip().strip('"\'')
         
-        should_proceed = not any(word in ai_text.lower() for word in 
-                                ['clarify', 'invalid', 'please provide', 'could you', 'can you provide', 'more specific'])
+        # Determine if we should proceed based on AI response
+        proceed_indicators = ['great', 'perfect', 'excellent', 'good', 'thank', 'recorded', 'got it']
+        stop_indicators = ['could you', 'please provide', 'i need', 'can you', 'clarify', 'invalid', 'must be', 'should be']
+        
+        ai_lower = ai_text.lower()
+        should_proceed = any(indicator in ai_lower for indicator in proceed_indicators) and \
+                        not any(indicator in ai_lower for indicator in stop_indicators)
         
         return {
             'response': ai_text,
@@ -307,6 +352,7 @@ Be concise and professional. Return only your response text."""
             'validated_value': user_message if should_proceed else None
         }
     except Exception as e:
+        st.error(f"Validation error: {str(e)}")
         return {
             'response': f"Recorded: {user_message}",
             'should_proceed': True,
@@ -418,7 +464,11 @@ if st.session_state.step == 'upload':
                     if placeholders:
                         st.session_state.placeholders = placeholders
                         
-                        first_question = get_ai_question_for_placeholder(placeholders[0], {})
+                        first_question = get_ai_question_for_placeholder(
+                            placeholders[0], 
+                            {}, 
+                            text[:500]  # Pass document context
+                        )
                         
                         st.session_state.messages = [{
                             'type': 'assistant',
@@ -498,7 +548,11 @@ elif st.session_state.step == 'chat':
                         
                         if st.session_state.current_index < len(st.session_state.placeholders):
                             next_placeholder = st.session_state.placeholders[st.session_state.current_index]
-                            next_question = get_ai_question_for_placeholder(next_placeholder, st.session_state.filled_data)
+                            next_question = get_ai_question_for_placeholder(
+                                next_placeholder, 
+                                st.session_state.filled_data,
+                                st.session_state.document_text
+                            )
                             response = f"{ai_result['response']} {next_question}"
                         else:
                             response = "Perfect! All placeholders have been filled. Your document is ready for review! 🎉"
