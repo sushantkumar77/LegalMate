@@ -1,488 +1,475 @@
 import streamlit as st
 import re
+import io
+import google.generativeai as genai
 from docx import Document
-from io import BytesIO
+import os
 from datetime import datetime
 
-st.set_page_config(page_title="Document Placeholder Filler", page_icon="📝", layout="wide")
+st.set_page_config(
+    page_title="Legal Document Processor",
+    page_icon="📄",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-def extract_text_and_placeholders(docx_file):
-    """
-    Universal placeholder extraction that works with any document type.
-    Detects: {{x}}, {x}, [x], <<x>>, and blank fields like [____]
-    """
-    try:
-        doc = Document(docx_file)
-        full_text = []
-        
-        # Extract all text from paragraphs and tables
-        for para in doc.paragraphs:
-            full_text.append(para.text)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    full_text.append(cell.text)
-        
-        text = "\n".join(full_text)
-        
-        # Multiple pattern formats to catch all placeholder styles
-        patterns = [
-            r'\{\{([^}]+)\}\}',      # {{placeholder}}
-            r'\{([^{}]+)\}',          # {placeholder}
-            r'\[([^\[\]]+)\]',        # [placeholder]
-            r'<<([^<>]+)>>',          # <<placeholder>>
-        ]
-        
-        raw_placeholders = []
-        for pattern in patterns:
-            matches = re.findall(pattern, text)
-            for match in matches:
-                raw_placeholders.append(match.strip())
-        
-        # Smart filtering to remove non-placeholders
-        filtered_placeholders = []
-        seen = set()
-        
-        for p in raw_placeholders:
-            # Skip if already processed
-            if p in seen:
-                continue
-            
-            # Skip completely empty
-            if len(p) == 0:
-                continue
-            
-            # Handle underscore-only fields (blank fill-ins like [_______])
-            if re.match(r'^[_\s\-]+$', p):
-                # Only include if it has 3+ underscores (meaningful blank field)
-                if p.count('_') >= 3 or p.count('-') >= 3:
-                    # Try to find context
-                    context = find_context_for_blank(text, p)
-                    if context:
-                        filtered_placeholders.append(p)
-                        seen.add(p)
-                continue
-            
-            # Skip common document formatting artifacts
-            skip_words = [
-                'underline', 'bold', 'italic', 'strike', 'strikethrough',
-                'excluding', 'other than', 'provided', 'including',
-                'without limitation', 'e.g.', 'i.e.', 'etc'
-            ]
-            if p.lower() in skip_words:
-                continue
-            
-            # Skip if it's just punctuation
-            if re.match(r'^[^\w\s]+$', p):
-                continue
-            
-            # Skip pure numbers (likely page numbers or references)
-            if p.isdigit():
-                continue
-            
-            # Skip very short strings unless they're common abbreviations
-            if len(p) == 1:
-                continue
-            
-            # Must contain at least one letter or underscore
-            if not re.search(r'[a-zA-Z_]', p):
-                continue
-            
-            # Add to filtered list
-            filtered_placeholders.append(p)
-            seen.add(p)
-        
-        # Remove exact duplicates and maintain document order
-        return text, filtered_placeholders
-        
-    except Exception as e:
-        st.error(f"Error reading document: {str(e)}")
-        return "", []
+st.markdown("""
+<style>
+    .main {
+        padding: 0rem 1rem;
+    }
+    .stButton>button {
+        width: 100%;
+        border-radius: 10px;
+        height: 3em;
+        font-weight: 600;
+    }
+    .upload-section {
+        border: 2px dashed #4CAF50;
+        border-radius: 10px;
+        padding: 2rem;
+        text-align: center;
+        background-color: #f0f8ff;
+    }
+    .chat-message {
+        padding: 1rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+    }
+    .user-message {
+        background-color: #007bff;
+        color: white;
+        margin-left: 20%;
+    }
+    .assistant-message {
+        background-color: #f1f3f4;
+        color: black;
+        margin-right: 20%;
+    }
+    .placeholder-box {
+        padding: 0.8rem;
+        border-radius: 8px;
+        margin-bottom: 0.5rem;
+        border-left: 4px solid;
+    }
+    .completed {
+        background-color: #d4edda;
+        border-color: #28a745;
+    }
+    .current {
+        background-color: #cce5ff;
+        border-color: #007bff;
+    }
+    .pending {
+        background-color: #f8f9fa;
+        border-color: #dee2e6;
+    }
+    .success-box {
+        padding: 1.5rem;
+        border-radius: 10px;
+        background-color: #d4edda;
+        border: 2px solid #28a745;
+        text-align: center;
+    }
+    .doc-preview {
+        background-color: #f8f9fa;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border: 1px solid #dee2e6;
+        max-height: 500px;
+        overflow-y: auto;
+        font-family: monospace;
+        white-space: pre-wrap;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-
-def find_context_for_blank(text, blank_placeholder):
-    """
-    Find surrounding text to understand what a blank field represents.
-    Returns the inferred field name or None.
-    """
-    # Escape special regex characters
-    escaped = re.escape(f'[{blank_placeholder}]')
-    
-    # Look for text before the blank (up to 100 characters)
-    pattern = r'(.{0,100})' + escaped
-    match = re.search(pattern, text, re.IGNORECASE)
-    
-    if match:
-        before_text = match.group(1).lower()
-        
-        # Common patterns to look for
-        if '$' in before_text[-10:]:
-            if 'amount' in before_text:
-                return 'amount_field'
-            elif 'price' in before_text or 'value' in before_text:
-                return 'price_field'
-            else:
-                return 'currency_field'
-        
-        # Check for date indicators
-        if any(word in before_text[-30:] for word in ['date', 'dated', 'day of']):
-            return 'date_field'
-        
-        # Check for name indicators
-        if any(word in before_text[-30:] for word in ['name', 'named', 'by and between']):
-            return 'name_field'
-        
-        # Otherwise include if it seems like a meaningful blank
-        return 'blank_field'
-    
-    return None
-
-
-def generate_question_from_placeholder(placeholder):
-    """
-    Universal question generator that works for any placeholder.
-    Uses pattern matching and common sense to create clear questions.
-    """
-    
-    # Handle blank/underscore placeholders
-    if re.match(r'^[_\s\-]+$', placeholder):
-        return "Please provide the value for this blank field:"
-    
-    # Clean up the placeholder for analysis
-    readable = placeholder.replace('_', ' ').replace('-', ' ')
-    readable = re.sub(r'([a-z])([A-Z])', r'\1 \2', readable)  # camelCase to spaces
-    readable = ' '.join(readable.split())  # normalize spaces
-    lower_readable = readable.lower()
-    
-    # Pattern-based question generation with examples
-    
-    # Money/Currency patterns
-    if any(word in lower_readable for word in ['amount', 'price', 'payment', 'fee', 'cost', 'salary', 'wage', 'compensation']):
-        return f"What is the {readable}? (e.g., 50000 or $50,000)"
-    
-    if any(word in lower_readable for word in ['valuation', 'cap', 'value']):
-        return f"What is the {readable}? (e.g., 5000000)"
-    
-    # Date patterns
-    if any(word in lower_readable for word in ['date', 'day', 'month', 'year', 'when']):
-        return f"What is the {readable}? (e.g., January 15, 2024 or 01/15/2024)"
-    
-    # Name patterns
-    if 'name' in lower_readable:
-        if any(word in lower_readable for word in ['company', 'business', 'organization', 'entity']):
-            return f"What is the {readable}? (Full legal name)"
-        elif any(word in lower_readable for word in ['person', 'individual', 'party', 'client', 'employee', 'investor']):
-            return f"What is the {readable}? (Full name)"
-        else:
-            return f"What is the {readable}?"
-    
-    # Contact information
-    if 'email' in lower_readable or 'e-mail' in lower_readable:
-        return f"What is the {readable}? (e.g., user@example.com)"
-    
-    if 'phone' in lower_readable or 'telephone' in lower_readable or 'mobile' in lower_readable:
-        return f"What is the {readable}? (e.g., +1-555-123-4567 or (555) 123-4567)"
-    
-    if 'address' in lower_readable:
-        if 'email' in lower_readable:
-            return f"What is the {readable}? (e.g., user@example.com)"
-        else:
-            return f"What is the {readable}? (Full address including city, state, ZIP)"
-    
-    if any(word in lower_readable for word in ['zip', 'postal', 'postcode']):
-        return f"What is the {readable}? (e.g., 12345 or 12345-6789)"
-    
-    if 'city' in lower_readable:
-        return f"What is the {readable}? (e.g., San Francisco)"
-    
-    # Location patterns
-    if any(word in lower_readable for word in ['state', 'province', 'region']):
-        return f"What is the {readable}? (e.g., California, New York)"
-    
-    if 'country' in lower_readable:
-        return f"What is the {readable}? (e.g., United States, Canada)"
-    
-    # Position/Title patterns
-    if any(word in lower_readable for word in ['title', 'position', 'role', 'designation']):
-        return f"What is the {readable}? (e.g., CEO, Manager, Director)"
-    
-    # Number patterns
-    if any(word in lower_readable for word in ['number', 'num', 'no', '#', 'id', 'identifier']):
-        if 'tax' in lower_readable or 'ein' in lower_readable or 'ssn' in lower_readable:
-            return f"What is the {readable}? (e.g., 12-3456789)"
-        return f"What is the {readable}?"
-    
-    # Percentage patterns
-    if any(word in lower_readable for word in ['percent', 'percentage', 'rate', '%']):
-        return f"What is the {readable}? (e.g., 5 or 5.5)"
-    
-    # Description/Text patterns
-    if any(word in lower_readable for word in ['description', 'details', 'notes', 'comments']):
-        return f"Please provide the {readable}:"
-    
-    # Signature patterns
-    if any(word in lower_readable for word in ['signature', 'signed', 'sign']):
-        return f"What is the {readable}? (Name for signature)"
-    
-    # Yes/No patterns
-    if any(word in lower_readable for word in ['yes/no', 'y/n', 'true/false']):
-        return f"What is the {readable}? (Yes or No)"
-    
-    # Duration/Time patterns
-    if any(word in lower_readable for word in ['duration', 'period', 'term', 'time']):
-        return f"What is the {readable}? (e.g., 12 months, 2 years)"
-    
-    # Quantity patterns
-    if any(word in lower_readable for word in ['quantity', 'count', 'total', 'units']):
-        return f"What is the {readable}? (Enter a number)"
-    
-    # Default case - smart capitalization
-    if readable.islower():
-        readable = readable.capitalize()
-    elif readable.isupper() and len(readable) > 3:
-        readable = readable.title()
-    
-    return f"What is the {readable}?"
-
-
-def replace_placeholders_in_docx(original_file, placeholder_values):
-    """
-    Universal placeholder replacement supporting all formats.
-    """
-    try:
-        original_file.seek(0)
-        doc = Document(original_file)
-        
-        # Replace in paragraphs
-        for para in doc.paragraphs:
-            for placeholder, value in placeholder_values.items():
-                # All possible placeholder formats
-                patterns = [
-                    f'{{{{{placeholder}}}}}',  # {{placeholder}}
-                    f'{{{placeholder}}}',       # {placeholder}
-                    f'[{placeholder}]',         # [placeholder]
-                    f'<<{placeholder}>>',       # <<placeholder>>
-                ]
-                
-                for pattern in patterns:
-                    if pattern in para.text:
-                        for run in para.runs:
-                            if pattern in run.text:
-                                run.text = run.text.replace(pattern, str(value))
-        
-        # Replace in tables
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    for placeholder, value in placeholder_values.items():
-                        patterns = [
-                            f'{{{{{placeholder}}}}}',
-                            f'{{{placeholder}}}',
-                            f'[{placeholder}]',
-                            f'<<{placeholder}>>',
-                        ]
-                        
-                        for pattern in patterns:
-                            if pattern in cell.text:
-                                for para in cell.paragraphs:
-                                    for run in para.runs:
-                                        if pattern in run.text:
-                                            run.text = run.text.replace(pattern, str(value))
-        
-        # Save to BytesIO
-        output = BytesIO()
-        doc.save(output)
-        output.seek(0)
-        return output
-        
-    except Exception as e:
-        st.error(f"Error replacing placeholders: {str(e)}")
-        return None
-
-
-# Session state initialization
-if 'uploaded_file' not in st.session_state:
-    st.session_state.uploaded_file = None
+if 'step' not in st.session_state:
+    st.session_state.step = 'upload'
 if 'placeholders' not in st.session_state:
     st.session_state.placeholders = []
-if 'current_placeholder_index' not in st.session_state:
-    st.session_state.current_placeholder_index = 0
-if 'placeholder_values' not in st.session_state:
-    st.session_state.placeholder_values = {}
-if 'chat_history' not in st.session_state:
-    st.session_state.chat_history = []
-if 'document_completed' not in st.session_state:
-    st.session_state.document_completed = False
-if 'original_file_bytes' not in st.session_state:
-    st.session_state.original_file_bytes = None
+if 'filled_data' not in st.session_state:
+    st.session_state.filled_data = {}
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+if 'current_index' not in st.session_state:
+    st.session_state.current_index = 0
+if 'document_text' not in st.session_state:
+    st.session_state.document_text = ""
+if 'file_name' not in st.session_state:
+    st.session_state.file_name = ""
+if 'completed_doc' not in st.session_state:
+    st.session_state.completed_doc = ""
 
+GEMINI_API_KEY = os.getenv('GEMINI_API_KEY', '')
 
-# Main UI
-st.title("📝 Document Placeholder Filler")
-st.markdown("Upload any .docx document with placeholders, and I'll help you fill them in!")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-pro')
 
-# Sidebar
-with st.sidebar:
-    st.header("ℹ️ How it works")
-    st.markdown("""
-    1. Upload a `.docx` file with placeholders
-    2. Supported formats:
-        - `{{placeholder}}`
-        - `{placeholder}`
-        - `[placeholder]`
-        - `<<placeholder>>`
-        - `[_______]` (blank fields)
-    3. Answer questions in the chat
-    4. Download your completed document
+def detect_placeholders(text):
+    patterns = [
+        (r'\[([^\]]+)\]', 'square'),
+        (r'\{([^}]+)\}', 'curly'),
+        (r'\$\{([^}]+)\}', 'dollar'),
+        (r'<([^>]+)>', 'angle'),
+        (r'\[\[([^\]]+)\]\]', 'double-square'),
+        (r'\{\{([^}]+)\}\}', 'double-curly'),
+        (r'_{3,}', 'underscore'),
+        (r'\.{3,}', 'dots'),
+    ]
     
-    **Works with any document:**
-    - Contracts & Agreements
-    - Forms & Applications
-    - Letters & Memos
-    - Legal Documents
-    - HR Documents
-    - And more!
+    found = {}
+    locations = []
+    
+    for pattern, pattern_type in patterns:
+        for match in re.finditer(pattern, text):
+            if match.groups():
+                placeholder = match.group(1).strip()
+            else:
+                placeholder = match.group(0).strip()
+            
+            if len(placeholder) < 2 or len(placeholder) > 100:
+                continue
+            if placeholder.upper() in ['THE', 'AND', 'OR', 'OF', 'IN', 'TO', 'A', 'IS', 'IT', 'AT']:
+                continue
+            
+            key = re.sub(r'[^a-z0-9]', '_', placeholder.lower())
+            
+            if key not in found:
+                found[key] = True
+                locations.append({
+                    'key': key,
+                    'label': placeholder,
+                    'original': match.group(0),
+                    'value': '',
+                    'position': match.start(),
+                    'type': pattern_type
+                })
+    
+    return sorted(locations, key=lambda x: x['position'])
+
+def parse_docx(file):
+    try:
+        doc = Document(file)
+        full_text = []
+        for para in doc.paragraphs:
+            full_text.append(para.text)
+        return '\n'.join(full_text)
+    except Exception as e:
+        st.error(f"Error parsing DOCX: {str(e)}")
+        return ""
+
+def get_ai_response(user_message, current_placeholder, filled_data):
+    if not GEMINI_API_KEY:
+        return {
+            'response': f"Got it! I've recorded '{user_message}' for {current_placeholder['label']}.",
+            'should_proceed': True,
+            'validated_value': user_message
+        }
+    
+    try:
+        prompt = f"""You are an AI assistant helping to fill out a legal document.
+
+Current placeholder to fill: "{current_placeholder['label']}"
+User's response: "{user_message}"
+
+Your tasks:
+1. Validate if the user's response is appropriate for "{current_placeholder['label']}"
+2. If valid, acknowledge briefly (1 sentence) and confirm you're ready for the next field
+3. If invalid or incomplete, ask for clarification politely
+4. Be professional, concise, and helpful
+
+Already filled placeholders:
+{chr(10).join([f"- {k}: {v}" for k, v in filled_data.items()])}
+
+Respond in a conversational, professional tone. Keep response under 50 words."""
+
+        response = model.generate_content(prompt)
+        ai_text = response.text
+        
+        should_proceed = not any(word in ai_text.lower() for word in 
+                                ['clarify', 'invalid', 'please provide', 'could you', 'can you provide'])
+        
+        return {
+            'response': ai_text,
+            'should_proceed': should_proceed,
+            'validated_value': user_message if should_proceed else None
+        }
+    except Exception as e:
+        st.error(f"AI Error: {str(e)}")
+        return {
+            'response': f"Recorded: {user_message}",
+            'should_proceed': True,
+            'validated_value': user_message
+        }
+
+def generate_completed_document():
+    completed = st.session_state.document_text
+    for placeholder in st.session_state.placeholders:
+        value = st.session_state.filled_data.get(placeholder['key'], placeholder['original'])
+        completed = completed.replace(placeholder['original'], value)
+    return completed
+
+def reset_app():
+    st.session_state.step = 'upload'
+    st.session_state.placeholders = []
+    st.session_state.filled_data = {}
+    st.session_state.messages = []
+    st.session_state.current_index = 0
+    st.session_state.document_text = ""
+    st.session_state.file_name = ""
+    st.session_state.completed_doc = ""
+    st.rerun()
+
+col1, col2 = st.columns([6, 1])
+with col1:
+    st.title("📄 Legal Document Processor")
+    st.caption("AI-powered document completion with intelligent placeholder detection")
+with col2:
+    if st.session_state.step != 'upload':
+        if st.button("🔄 Reset", use_container_width=True):
+            reset_app()
+
+if st.session_state.step == 'upload':
+    st.markdown("---")
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+        <div class="upload-section">
+            <h2>📤 Upload Your Document</h2>
+            <p>Upload a legal document with placeholders and I'll help you fill them in</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        uploaded_file = st.file_uploader(
+            "Choose a file",
+            type=['txt', 'docx'],
+            help="Supports .txt and .docx files up to 10MB"
+        )
+        
+        if uploaded_file:
+            with st.spinner("Processing document..."):
+                if uploaded_file.name.endswith('.docx'):
+                    text = parse_docx(uploaded_file)
+                else:
+                    text = uploaded_file.read().decode('utf-8')
+                
+                if text:
+                    st.session_state.document_text = text
+                    st.session_state.file_name = uploaded_file.name
+                    
+                    placeholders = detect_placeholders(text)
+                    
+                    if placeholders:
+                        st.session_state.placeholders = placeholders
+                        st.session_state.messages = [{
+                            'type': 'assistant',
+                            'content': f"I've analyzed your document and found {len(placeholders)} placeholders to fill. Let's start! What is the {placeholders[0]['label']}?",
+                            'timestamp': datetime.now()
+                        }]
+                        st.session_state.step = 'chat'
+                        st.rerun()
+                    else:
+                        st.error("❌ No placeholders detected in your document. Please upload a document with placeholders like [Company Name], {Date}, etc.")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        with st.expander("ℹ️ Supported Placeholder Formats"):
+            st.markdown("""
+            - [Company Name] - Square brackets
+            - {Date} - Curly braces  
+            - <Amount> - Angle brackets
+            - ${Variable} - Dollar sign with braces
+            - [[Field]] - Double square brackets
+            - {{Field}} - Double curly braces
+            - _____ - Underscores (3 or more)
+            - ... - Dots (3 or more)
+            """)
+
+elif st.session_state.step == 'chat':
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.markdown("### 💬 Fill in the Details")
+        
+        progress = st.session_state.current_index / len(st.session_state.placeholders)
+        st.progress(progress)
+        st.caption(f"Progress: {st.session_state.current_index} of {len(st.session_state.placeholders)} completed")
+        
+        st.markdown("---")
+        
+        chat_container = st.container()
+        with chat_container:
+            for msg in st.session_state.messages:
+                if msg['type'] == 'user':
+                    st.markdown(f"""
+                    <div class="chat-message user-message">
+                        <strong>You:</strong> {msg['content']}
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown(f"""
+                    <div class="chat-message assistant-message">
+                        <strong>Assistant:</strong> {msg['content']}
+                    </div>
+                    """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        if st.session_state.current_index < len(st.session_state.placeholders):
+            with st.form(key='chat_form', clear_on_submit=True):
+                user_input = st.text_input(
+                    "Your answer:",
+                    placeholder="Type your response here...",
+                    key='user_input'
+                )
+                submit = st.form_submit_button("Send", use_container_width=True)
+                
+                if submit and user_input:
+                    st.session_state.messages.append({
+                        'type': 'user',
+                        'content': user_input,
+                        'timestamp': datetime.now()
+                    })
+                    
+                    current_placeholder = st.session_state.placeholders[st.session_state.current_index]
+                    ai_result = get_ai_response(user_input, current_placeholder, st.session_state.filled_data)
+                    
+                    if ai_result['should_proceed']:
+                        st.session_state.filled_data[current_placeholder['key']] = user_input
+                        st.session_state.current_index += 1
+                        
+                        if st.session_state.current_index < len(st.session_state.placeholders):
+                            next_placeholder = st.session_state.placeholders[st.session_state.current_index]
+                            response = f"{ai_result['response']} Next: What is the {next_placeholder['label']}?"
+                        else:
+                            response = "Perfect! All placeholders have been filled. Your document is ready for review! 🎉"
+                            st.session_state.step = 'complete'
+                    else:
+                        response = ai_result['response']
+                    
+                    st.session_state.messages.append({
+                        'type': 'assistant',
+                        'content': response,
+                        'timestamp': datetime.now()
+                    })
+                    
+                    st.rerun()
+    
+    with col2:
+        st.markdown("### 📋 Placeholders")
+        
+        for idx, placeholder in enumerate(st.session_state.placeholders):
+            if idx < st.session_state.current_index:
+                status_class = "completed"
+                icon = "✅"
+            elif idx == st.session_state.current_index:
+                status_class = "current"
+                icon = "▶️"
+            else:
+                status_class = "pending"
+                icon = "⭕"
+            
+            value_text = st.session_state.filled_data.get(placeholder['key'], '')
+            value_display = f"<br><small><i>{value_text}</i></small>" if value_text else ""
+            
+            st.markdown(f"""
+            <div class="placeholder-box {status_class}">
+                {icon} <strong>{placeholder['label']}</strong>{value_display}
+            </div>
+            """, unsafe_allow_html=True)
+
+elif st.session_state.step == 'complete':
+    st.markdown("---")
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("""
+        <div class="success-box">
+            <h1>✅ Document Complete!</h1>
+            <p>All placeholders have been filled. Review and download your document.</p>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    completed_doc = generate_completed_document()
+    st.session_state.completed_doc = completed_doc
+    
+    st.markdown("### 📄 Document Preview")
+    st.markdown(f'<div class="doc-preview">{completed_doc}</div>', unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col1:
+        st.download_button(
+            label="📥 Download as TXT",
+            data=completed_doc,
+            file_name=f"completed_{st.session_state.file_name.replace('.docx', '.txt')}",
+            mime="text/plain",
+            use_container_width=True
+        )
+    
+    with col2:
+        doc = Document()
+        for line in completed_doc.split('\n'):
+            doc.add_paragraph(line)
+        
+        bio = io.BytesIO()
+        doc.save(bio)
+        bio.seek(0)
+        
+        st.download_button(
+            label="📥 Download as DOCX",
+            data=bio.getvalue(),
+            file_name=f"completed_{st.session_state.file_name}",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
+    
+    with col3:
+        if st.button("🔄 Process Another", use_container_width=True):
+            reset_app()
+
+with st.sidebar:
+    st.markdown("### ⚙️ Settings")
+    
+    api_key_input = st.text_input(
+        "Gemini API Key",
+        value=GEMINI_API_KEY,
+        type="password",
+        help="Enter your Google Gemini API key for AI-powered responses"
+    )
+    
+    if api_key_input and api_key_input != GEMINI_API_KEY:
+        os.environ['GEMINI_API_KEY'] = api_key_input
+        genai.configure(api_key=api_key_input)
+        st.success("✅ API Key updated!")
+    
+    st.markdown("---")
+    
+    st.markdown("### 📊 Statistics")
+    if st.session_state.placeholders:
+        st.metric("Total Placeholders", len(st.session_state.placeholders))
+        st.metric("Filled", len(st.session_state.filled_data))
+        st.metric("Remaining", len(st.session_state.placeholders) - len(st.session_state.filled_data))
+    
+    st.markdown("---")
+    
+    st.markdown("### ℹ️ About")
+    st.info("""
+    This app helps you fill legal documents by:
+    - Detecting placeholders automatically
+    - Guiding you through each field
+    - Using AI to validate inputs
+    - Generating completed documents
     """)
     
     st.markdown("---")
-    if st.button("🔄 Start Over", use_container_width=True):
-        for key in list(st.session_state.keys()):
-            del st.session_state[key]
-        st.rerun()
-
-
-# File upload
-if not st.session_state.document_completed:
-    uploaded_file = st.file_uploader(
-        "Upload your .docx document",
-        type=['docx'],
-        help="Upload any Word document containing placeholders"
-    )
-    
-    if uploaded_file is not None:
-        if st.session_state.uploaded_file is None or uploaded_file.name != st.session_state.uploaded_file:
-            st.session_state.uploaded_file = uploaded_file.name
-            st.session_state.original_file_bytes = uploaded_file.getvalue()
-            
-            file_bytes = BytesIO(st.session_state.original_file_bytes)
-            text, placeholders = extract_text_and_placeholders(file_bytes)
-            
-            if placeholders:
-                st.session_state.placeholders = placeholders
-                st.session_state.current_placeholder_index = 0
-                st.session_state.placeholder_values = {}
-                st.session_state.chat_history = []
-                st.session_state.document_completed = False
-                
-                st.success(f"✅ Document uploaded! Found {len(placeholders)} placeholders to fill.")
-                
-                with st.expander("📋 Detected Placeholders"):
-                    for i, placeholder in enumerate(placeholders, 1):
-                        display_text = placeholder if len(placeholder) < 50 else placeholder[:47] + "..."
-                        st.write(f"{i}. `{display_text}`")
-            else:
-                st.warning("⚠️ No placeholders detected. Make sure your document contains placeholders like [name], {date}, or {{company}}.")
-                st.session_state.uploaded_file = None
-
-
-# Chat interface
-if st.session_state.placeholders and not st.session_state.document_completed:
-    st.markdown("---")
-    st.header("💬 Fill in the Placeholders")
-    
-    # Progress indicator
-    progress = st.session_state.current_placeholder_index / len(st.session_state.placeholders)
-    st.progress(progress, text=f"Progress: {st.session_state.current_placeholder_index}/{len(st.session_state.placeholders)} completed")
-    
-    # Chat history
-    chat_container = st.container()
-    with chat_container:
-        for message in st.session_state.chat_history:
-            with st.chat_message(message['role']):
-                st.write(message['content'])
-    
-    # Current question
-    if st.session_state.current_placeholder_index < len(st.session_state.placeholders):
-        current_placeholder = st.session_state.placeholders[st.session_state.current_placeholder_index]
-        
-        if not st.session_state.chat_history or st.session_state.chat_history[-1]['role'] != 'assistant':
-            question = generate_question_from_placeholder(current_placeholder)
-            
-            st.session_state.chat_history.append({
-                'role': 'assistant',
-                'content': f"**Question {st.session_state.current_placeholder_index + 1}/{len(st.session_state.placeholders)}:** {question}"
-            })
-            st.rerun()
-        
-        # User input
-        user_input = st.chat_input(f"Your answer for placeholder #{st.session_state.current_placeholder_index + 1}...")
-        
-        if user_input:
-            st.session_state.placeholder_values[current_placeholder] = user_input
-            st.session_state.chat_history.append({
-                'role': 'user',
-                'content': user_input
-            })
-            
-            st.session_state.current_placeholder_index += 1
-            
-            if st.session_state.current_placeholder_index >= len(st.session_state.placeholders):
-                st.session_state.document_completed = True
-                st.session_state.chat_history.append({
-                    'role': 'assistant',
-                    'content': "🎉 Perfect! All placeholders filled. Download your document below!"
-                })
-            
-            st.rerun()
-
-
-# Download section
-if st.session_state.document_completed and st.session_state.original_file_bytes:
-    st.markdown("---")
-    st.header("✅ Document Complete!")
-    
-    original_file = BytesIO(st.session_state.original_file_bytes)
-    completed_doc = replace_placeholders_in_docx(original_file, st.session_state.placeholder_values)
-    
-    if completed_doc:
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.subheader("📄 Summary of Changes")
-            for i, (placeholder, value) in enumerate(st.session_state.placeholder_values.items(), 1):
-                display_placeholder = placeholder if len(placeholder) < 40 else placeholder[:37] + "..."
-                st.write(f"{i}. **{display_placeholder}** → {value}")
-        
-        with col2:
-            st.subheader("⬇️ Download")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            docx_filename = f"completed_{timestamp}.docx"
-            
-            st.download_button(
-                label="📥 Download DOCX",
-                data=completed_doc.getvalue(),
-                file_name=docx_filename,
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True
-            )
-            
-            st.info("💡 Convert to PDF using Word, Google Docs, or online tools")
-        
-        st.markdown("---")
-        if st.button("✏️ Edit Answers", use_container_width=True):
-            st.session_state.document_completed = False
-            st.session_state.current_placeholder_index = 0
-            st.session_state.chat_history = []
-            st.rerun()
-
-
-# Footer
-st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align: center; color: gray; font-size: 0.9em;'>
-    Made By Sushant Kumar | Universal Document Placeholder Filler
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+    st.caption("Built with Streamlit & Google Gemini AI")
