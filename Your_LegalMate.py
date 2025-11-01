@@ -1,4 +1,33 @@
 import streamlit as st
+import subprocess
+import sys
+import importlib.util
+
+# Auto-install python-docx if not available
+def install_and_import(package_name, import_name=None):
+    """Install package if not available and import it"""
+    if import_name is None:
+        import_name = package_name
+    
+    # Check if package is already installed
+    package_spec = importlib.util.find_spec(import_name)
+    
+    if package_spec is None:
+        st.info(f"📦 Installing {package_name}... This may take a moment.")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name, "--quiet"])
+            st.success(f"✅ Successfully installed {package_name}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ Failed to install {package_name}: {str(e)}")
+            st.stop()
+
+# Install required packages
+install_and_import("python-docx", "docx")
+install_and_import("lxml")
+install_and_import("Pillow", "PIL")
+
+# Now import after ensuring packages are installed
 import re
 from docx import Document
 from io import BytesIO
@@ -84,10 +113,6 @@ def replace_placeholders_in_docx(original_file, placeholder_values):
     except Exception as e:
         st.error(f"Error replacing placeholders: {str(e)}")
         return None
-
-def docx_to_pdf_fallback(docx_file):
-    st.warning("PDF export requires additional system dependencies not available in this environment. Please download the DOCX file and convert it using Microsoft Word or an online converter.")
-    return None
 
 if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
@@ -225,5 +250,5 @@ st.markdown(
     Made By Sushant Kumar using Streamlit | Supports .docx files with multiple placeholder formats
     </div>
     """,
-    unsafe_allow_html=True #
+    unsafe_allow_html=True
 )
