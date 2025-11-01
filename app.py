@@ -4,12 +4,9 @@ from docx import Document
 from io import BytesIO
 from datetime import datetime
 
-# --- All installation-related code has been removed ---
-
 st.set_page_config(page_title="Document Placeholder Filler", page_icon="📝", layout="wide")
 
 def extract_text_and_placeholders(docx_file):
-    # ... (rest of your function)
     try:
         doc = Document(docx_file)
         full_text = []
@@ -37,7 +34,6 @@ def extract_text_and_placeholders(docx_file):
         return "", []
 
 def generate_question_from_placeholder(placeholder, use_llm=False, api_key=None):
-    # ... (rest of your function)
     if use_llm and api_key:
         try:
             pass
@@ -49,7 +45,6 @@ def generate_question_from_placeholder(placeholder, use_llm=False, api_key=None)
     return f"What is the {readable}?"
 
 def replace_placeholders_in_docx(original_file, placeholder_values):
-    # ... (rest of your function)
     try:
         original_file.seek(0)
         doc = Document(original_file)
@@ -90,12 +85,10 @@ def replace_placeholders_in_docx(original_file, placeholder_values):
         st.error(f"Error replacing placeholders: {str(e)}")
         return None
 
-# --- Session State Initialization ---
 if 'uploaded_file' not in st.session_state:
     st.session_state.uploaded_file = None
 if 'placeholders' not in st.session_state:
     st.session_state.placeholders = []
-# ... (rest of your session state)
 if 'current_placeholder_index' not in st.session_state:
     st.session_state.current_placeholder_index = 0
 if 'placeholder_values' not in st.session_state:
@@ -107,11 +100,9 @@ if 'document_completed' not in st.session_state:
 if 'original_file_bytes' not in st.session_state:
     st.session_state.original_file_bytes = None
 
-# --- Main App UI ---
 st.title("📝 Document Placeholder Filler")
 st.markdown("Upload a .docx document with placeholders, and I'll help you fill them in through a conversational interface!")
 
-# --- Sidebar ---
 with st.sidebar:
     st.header("⚙️ Settings")
     use_llm = st.checkbox("Use Gemini API for Questions", value=False, help="Generate more natural questions using AI")
@@ -136,8 +127,6 @@ with st.sidebar:
             del st.session_state[key]
         st.rerun()
 
-# --- Main Page Logic ---
-# 1. File Upload Section
 if not st.session_state.document_completed:
     uploaded_file = st.file_uploader("Upload your .docx document", type=['docx'], help="Upload a Word document containing placeholders to fill")
     
@@ -162,7 +151,6 @@ if not st.session_state.document_completed:
                 st.warning("⚠️ No placeholders detected in the document. Please ensure your document contains placeholders in supported formats.")
                 st.session_state.uploaded_file = None
 
-# 2. Chat/Filling Section
 if st.session_state.placeholders and not st.session_state.document_completed:
     st.markdown("---")
     st.header("💬 Fill in the Placeholders")
@@ -205,9 +193,7 @@ if st.session_state.placeholders and not st.session_state.document_completed:
             
             st.rerun()
 
-# 3. Download Section
 if st.session_state.document_completed and st.session_state.original_file_bytes:
-    # ... (rest of your download section)
     st.markdown("---")
     st.header("✅ Document Complete!")
     original_file = BytesIO(st.session_state.original_file_bytes)
@@ -238,7 +224,6 @@ if st.session_state.document_completed and st.session_state.original_file_bytes:
             st.session_state.chat_history = []
             st.rerun()
 
-# --- Footer ---
 st.markdown("---")
 st.markdown(
     """
