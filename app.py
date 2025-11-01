@@ -26,6 +26,8 @@ st.markdown("""
         border-radius: 10px;
         height: 3em;
         font-weight: 600;
+        background-color: #007bff;
+        color: white;
     }
     .upload-section {
         border: 2px dashed #4CAF50;
@@ -33,6 +35,13 @@ st.markdown("""
         padding: 2rem;
         text-align: center;
         background-color: #f0f8ff;
+    }
+    .upload-section h2 {
+        color: #1a1a1a;
+        margin-bottom: 0.5rem;
+    }
+    .upload-section p {
+        color: #333333;
     }
     .chat-message {
         padding: 1rem;
@@ -45,8 +54,8 @@ st.markdown("""
         margin-left: 20%;
     }
     .assistant-message {
-        background-color: #f1f3f4;
-        color: black;
+        background-color: #e9ecef;
+        color: #212529;
         margin-right: 20%;
     }
     .placeholder-box {
@@ -54,18 +63,22 @@ st.markdown("""
         border-radius: 8px;
         margin-bottom: 0.5rem;
         border-left: 4px solid;
+        color: #212529;
     }
     .completed {
         background-color: #d4edda;
         border-color: #28a745;
+        color: #155724;
     }
     .current {
         background-color: #cce5ff;
         border-color: #007bff;
+        color: #004085;
     }
     .pending {
         background-color: #f8f9fa;
         border-color: #dee2e6;
+        color: #6c757d;
     }
     .success-box {
         padding: 1.5rem;
@@ -74,15 +87,22 @@ st.markdown("""
         border: 2px solid #28a745;
         text-align: center;
     }
+    .success-box h1 {
+        color: #155724;
+    }
+    .success-box p {
+        color: #155724;
+    }
     .doc-preview {
-        background-color: #f8f9fa;
+        background-color: #ffffff;
         padding: 1.5rem;
         border-radius: 10px;
-        border: 1px solid #dee2e6;
+        border: 2px solid #dee2e6;
         max-height: 500px;
         overflow-y: auto;
         font-family: monospace;
         white-space: pre-wrap;
+        color: #212529;
     }
 </style>
 """, unsafe_allow_html=True)
