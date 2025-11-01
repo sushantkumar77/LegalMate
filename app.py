@@ -5,6 +5,9 @@ import google.generativeai as genai
 from docx import Document
 import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 st.set_page_config(
     page_title="Legal Document Processor",
