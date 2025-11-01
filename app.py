@@ -138,7 +138,7 @@ def detect_placeholders_with_ai(text):
         return []
     
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-pro')
         
         prompt = f"""You are analyzing a legal document to find ALL placeholders that need user input.
 
