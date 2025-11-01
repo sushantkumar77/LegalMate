@@ -117,28 +117,40 @@ if GEMINI_API_KEY and not st.session_state.api_configured:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         
-        # Try different model names
-        model_options = [
-            'gemini-1.5-flash',
-            'gemini-1.5-pro', 
-            'gemini-pro',
-            'models/gemini-1.5-flash',
-            'models/gemini-pro'
-        ]
-        
-        for model_name in model_options:
-            try:
-                test_model = genai.GenerativeModel(model_name)
-                # Test with a simple prompt
-                test_model.generate_content("Hi")
-                st.session_state.model_name = model_name
+        # List available models from API
+        try:
+            available_models = []
+            for model in genai.list_models():
+                if 'generateContent' in model.supported_generation_methods:
+                    available_models.append(model.name)
+            
+            if available_models:
+                # Use the first available model
+                st.session_state.model_name = available_models[0]
                 st.session_state.api_configured = True
-                break
-            except:
-                continue
-                
-        if not st.session_state.api_configured:
-            st.error("Could not find a working Gemini model. Please check your API key.")
+            else:
+                st.error("No generative models available with this API key")
+        except Exception as list_error:
+            # Fallback: try common model names directly
+            model_options = [
+                'gemini-1.5-flash',
+                'gemini-1.5-pro',
+                'gemini-2.0-flash-exp',
+                'gemini-pro'
+            ]
+            
+            for model_name in model_options:
+                try:
+                    test_model = genai.GenerativeModel(model_name)
+                    test_model.generate_content("test")
+                    st.session_state.model_name = model_name
+                    st.session_state.api_configured = True
+                    break
+                except:
+                    continue
+            
+            if not st.session_state.api_configured:
+                st.error(f"Could not configure API. Error: {str(list_error)}")
             
     except Exception as e:
         st.error(f"API configuration failed: {str(e)}")
