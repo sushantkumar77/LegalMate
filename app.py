@@ -17,28 +17,58 @@
 #                 for cell in row.cells:
 #                     full_text.append(cell.text)
 #         text = "\n".join(full_text)
+        
+#         # More precise patterns that avoid matching formatting or empty brackets
 #         patterns = [
-#             r'\{\{([^}]+)\}\}',
-#             r'\{([^}]+)\}',
-#             r'\[([^]]+)\]',
-#             r'<<([^>]+)>>',
+#             r'\{\{([^}]+)\}\}',  # {{placeholder}}
+#             r'\{([^{}]+)\}',      # {placeholder} - avoid nested braces
+#             r'\[([^\[\]]+)\]',    # [placeholder] - avoid nested brackets
+#             r'<<([^<>]+)>>',      # <<placeholder>>
 #         ]
+        
 #         placeholders = set()
 #         for pattern in patterns:
 #             matches = re.findall(pattern, text)
 #             placeholders.update(matches)
-#         placeholders = [p.strip() for p in placeholders if len(p.strip()) > 1 and not p.strip().isdigit()]
-#         return text, sorted(list(set(placeholders)))
+        
+#         # Improved filtering to remove invalid placeholders
+#         filtered_placeholders = []
+#         for p in placeholders:
+#             p_clean = p.strip()
+            
+#             # Skip if empty or too short
+#             if len(p_clean) < 2:
+#                 continue
+            
+#             # Skip if it's just numbers
+#             if p_clean.isdigit():
+#                 continue
+            
+#             # Skip if it's just special characters or whitespace
+#             if not any(c.isalnum() or c == '_' or c == '-' for c in p_clean):
+#                 continue
+            
+#             # Skip if it looks like formatting (e.g., "underline", "bold")
+#             formatting_keywords = ['underline', 'bold', 'italic', 'excluding', 'other than']
+#             if p_clean.lower() in formatting_keywords:
+#                 continue
+            
+#             # Skip if it's just punctuation or single character
+#             if len(p_clean.replace('_', '').replace('-', '').replace(' ', '')) < 2:
+#                 continue
+            
+#             # Skip if it contains only underscores or dashes
+#             if all(c in ['_', '-', ' '] for c in p_clean):
+#                 continue
+            
+#             filtered_placeholders.append(p_clean)
+        
+#         return text, sorted(list(set(filtered_placeholders)))
 #     except Exception as e:
 #         st.error(f"Error reading document: {str(e)}")
 #         return "", []
 
 # def generate_question_from_placeholder(placeholder, use_llm=False, api_key=None):
-#     if use_llm and api_key:
-#         try:
-#             pass
-#         except Exception as e:
-#             st.warning(f"LLM generation failed: {str(e)}. Using fallback.")
 #     readable = placeholder.replace('_', ' ').replace('-', ' ')
 #     readable = re.sub(r'([a-z])([A-Z])', r'\1 \2', readable)
 #     readable = readable.strip().capitalize()
@@ -50,33 +80,33 @@
 #         doc = Document(original_file)
 #         for para in doc.paragraphs:
 #             for placeholder, value in placeholder_values.items():
-#                 patterns_to_replace = [
-#                     f'{{{{{placeholder}}}}}',
-#                     f'{{{placeholder}}}',
-#                     f'[{placeholder}]',
-#                     f'<<{placeholder}>>',
+#                 patterns = [
+#                     (f'{{{{{placeholder}}}}}', value),
+#                     (f'{{{placeholder}}}', value),
+#                     (f'[{placeholder}]', value),
+#                     (f'<<{placeholder}>>', value),
 #                 ]
-#                 for pattern in patterns_to_replace:
+#                 for pattern, replacement in patterns:
 #                     if pattern in para.text:
 #                         for run in para.runs:
 #                             if pattern in run.text:
-#                                 run.text = run.text.replace(pattern, value)
+#                                 run.text = run.text.replace(pattern, replacement)
 #         for table in doc.tables:
 #             for row in table.rows:
 #                 for cell in row.cells:
 #                     for placeholder, value in placeholder_values.items():
-#                         patterns_to_replace = [
-#                             f'{{{{{placeholder}}}}}',
-#                             f'{{{placeholder}}}',
-#                             f'[{placeholder}]',
-#                             f'<<{placeholder}>>',
+#                         patterns = [
+#                             (f'{{{{{placeholder}}}}}', value),
+#                             (f'{{{placeholder}}}', value),
+#                             (f'[{placeholder}]', value),
+#                             (f'<<{placeholder}>>', value),
 #                         ]
-#                         for pattern in patterns_to_replace:
+#                         for pattern, replacement in patterns:
 #                             if pattern in cell.text:
 #                                 for para in cell.paragraphs:
 #                                     for run in para.runs:
 #                                         if pattern in run.text:
-#                                             run.text = run.text.replace(pattern, value)
+#                                             run.text = run.text.replace(pattern, replacement)
 #         output = BytesIO()
 #         doc.save(output)
 #         output.seek(0)
@@ -114,10 +144,10 @@
 #     st.markdown("""
 #     1. Upload a `.docx` file with placeholders
 #     2. Supported formats:
-#         - `{{placeholder}}`
-#         - `{placeholder}`
-#         - `[placeholder]`
-#         - `<<placeholder>>`
+#        - `{{placeholder}}`
+#        - `{placeholder}`
+#        - `[placeholder]`
+#        - `<<placeholder>>`
 #     3. Answer questions in the chat
 #     4. Download your completed document
 #     """)
@@ -129,14 +159,12 @@
 
 # if not st.session_state.document_completed:
 #     uploaded_file = st.file_uploader("Upload your .docx document", type=['docx'], help="Upload a Word document containing placeholders to fill")
-    
 #     if uploaded_file is not None:
 #         if st.session_state.uploaded_file is None or uploaded_file.name != st.session_state.uploaded_file:
 #             st.session_state.uploaded_file = uploaded_file.name
 #             st.session_state.original_file_bytes = uploaded_file.getvalue()
 #             file_bytes = BytesIO(st.session_state.original_file_bytes)
 #             text, placeholders = extract_text_and_placeholders(file_bytes)
-            
 #             if placeholders:
 #                 st.session_state.placeholders = placeholders
 #                 st.session_state.current_placeholder_index = 0
@@ -154,7 +182,6 @@
 # if st.session_state.placeholders and not st.session_state.document_completed:
 #     st.markdown("---")
 #     st.header("💬 Fill in the Placeholders")
-    
 #     chat_container = st.container()
 #     with chat_container:
 #         for message in st.session_state.chat_history:
@@ -164,33 +191,23 @@
 #             else:
 #                 with st.chat_message("user"):
 #                     st.write(message['content'])
-
 #     if st.session_state.current_placeholder_index < len(st.session_state.placeholders):
 #         current_placeholder = st.session_state.placeholders[st.session_state.current_placeholder_index]
-        
 #         if not st.session_state.chat_history or st.session_state.chat_history[-1]['role'] != 'assistant':
-#             question = generate_question_from_placeholder(
-#                 current_placeholder,
-#                 use_llm=use_llm,
-#                 api_key=gemini_api_key if use_llm else None
-#             )
+#             question = generate_question_from_placeholder(current_placeholder, use_llm=use_llm, api_key=gemini_api_key if use_llm else None)
 #             st.session_state.chat_history.append({
 #                 'role': 'assistant',
 #                 'content': f"**Question {st.session_state.current_placeholder_index + 1}/{len(st.session_state.placeholders)}:** {question}"
 #             })
 #             st.rerun()
-
 #         user_input = st.chat_input(f"Enter value for '{current_placeholder}'...")
-        
 #         if user_input:
 #             st.session_state.placeholder_values[current_placeholder] = user_input
 #             st.session_state.chat_history.append({'role': 'user', 'content': user_input})
 #             st.session_state.current_placeholder_index += 1
-            
 #             if st.session_state.current_placeholder_index >= len(st.session_state.placeholders):
 #                 st.session_state.document_completed = True
 #                 st.session_state.chat_history.append({'role': 'assistant', 'content': "🎉 Great! All placeholders have been filled. You can now download your completed document below."})
-            
 #             st.rerun()
 
 # if st.session_state.document_completed and st.session_state.original_file_bytes:
@@ -198,7 +215,6 @@
 #     st.header("✅ Document Complete!")
 #     original_file = BytesIO(st.session_state.original_file_bytes)
 #     completed_doc = replace_placeholders_in_docx(original_file, st.session_state.placeholder_values)
-    
 #     if completed_doc:
 #         col1, col2 = st.columns(2)
 #         with col1:
@@ -233,18 +249,6 @@
 #     """,
 #     unsafe_allow_html=True
 # )
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 import streamlit as st
@@ -318,10 +322,54 @@ def extract_text_and_placeholders(docx_file):
         return "", []
 
 def generate_question_from_placeholder(placeholder, use_llm=False, api_key=None):
+    # Dictionary of better question phrasings for common placeholders
+    better_questions = {
+        'Date of Safe': 'When was this SAFE agreement signed? (Date)',
+        'Date of safe': 'When was this SAFE agreement signed? (Date)',
+        'date of safe': 'When was this SAFE agreement signed? (Date)',
+        'Company Name': 'What is the company name?',
+        'company name': 'What is the company name?',
+        'Investor Name': 'What is the investor name?',
+        'investor name': 'What is the investor name?',
+        'Purchase Amount': 'What is the investment amount?',
+        'purchase amount': 'What is the investment amount?',
+        'State of Incorporation': 'In which state is the company incorporated?',
+        'state of incorporation': 'In which state is the company incorporated?',
+        'Governing Law Jurisdiction': 'Which state law will govern this agreement?',
+        'governing law jurisdiction': 'Which state law will govern this agreement?',
+    }
+    
+    # Check if we have a custom question for this placeholder
+    if placeholder in better_questions:
+        return better_questions[placeholder]
+    
+    # Otherwise, generate a question using smart logic
     readable = placeholder.replace('_', ' ').replace('-', ' ')
     readable = re.sub(r'([a-z])([A-Z])', r'\1 \2', readable)
-    readable = readable.strip().capitalize()
-    return f"What is the {readable}?"
+    readable = ' '.join(readable.split())
+    
+    # Special handling for common patterns
+    lower_readable = readable.lower()
+    
+    if 'date' in lower_readable:
+        return f"What is the {readable}?"
+    elif 'name' in lower_readable:
+        return f"What is the {readable}?"
+    elif 'amount' in lower_readable or 'price' in lower_readable:
+        return f"What is the {readable}?"
+    elif 'email' in lower_readable:
+        return f"What is the {readable}?"
+    elif 'phone' in lower_readable or 'number' in lower_readable:
+        return f"What is the {readable}?"
+    elif 'address' in lower_readable:
+        return f"What is the {readable}?"
+    else:
+        # For other cases, preserve capitalization
+        if readable.islower():
+            readable = readable.capitalize()
+        elif readable.isupper():
+            readable = readable.title()
+        return f"What is the {readable}?"
 
 def replace_placeholders_in_docx(original_file, placeholder_values):
     try:
